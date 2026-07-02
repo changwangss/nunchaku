@@ -19,7 +19,7 @@ from huggingface_hub import utils
 from torch.nn import GELU
 
 from ...ops.fused import fused_gelu_mlp
-from ...utils import get_precision, pad_tensor
+from ...utils import get_precision_from_quantization_config, pad_tensor
 from ..attention import NunchakuBaseAttention, NunchakuFeedForward
 from ..attention_processors.flux import NunchakuFluxFA2Processor, NunchakuFluxFP16AttnProcessor
 from ..embeddings import NunchakuFluxPosEmbed, pack_rotemb
@@ -413,7 +413,7 @@ class NunchakuFluxTransformer2DModelV2(FluxTransformer2DModel, NunchakuModelLoad
         rank = quantization_config.get("rank", 32)
         transformer = transformer.to(torch_dtype)
 
-        precision = get_precision()
+        precision = get_precision_from_quantization_config(quantization_config)
         if precision == "fp4":
             precision = "nvfp4"
         transformer._patch_model(precision=precision, rank=rank)

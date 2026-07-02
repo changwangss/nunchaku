@@ -22,7 +22,13 @@ from ..._C import QuantizedFluxModel
 from ..._C import utils as cutils
 from ...lora.flux.nunchaku_converter import fuse_vectors, to_nunchaku
 from ...lora.flux.utils import is_nunchaku_format
-from ...utils import check_hardware_compatibility, get_precision, load_state_dict_in_safetensors, pad_tensor
+from ...utils import (
+    check_hardware_compatibility,
+    get_precision,
+    get_precision_from_quantization_config,
+    load_state_dict_in_safetensors,
+    pad_tensor,
+)
 from .utils import NunchakuModelLoaderMixin
 
 SVD_RANK = 32
@@ -570,8 +576,8 @@ class NunchakuFluxTransformer2dModel(FluxTransformer2DModel, NunchakuModelLoader
                     quantized_part_sd[k] = v
                 else:
                     unquantized_part_sd[k] = v
-            precision = get_precision(device=device)
             quantization_config = json.loads(metadata["quantization_config"])
+            precision = get_precision_from_quantization_config(quantization_config)
             check_hardware_compatibility(quantization_config, device)
         else:
             transformer, unquantized_part_path, transformer_block_path = cls._build_model_legacy(
@@ -602,6 +608,11 @@ class NunchakuFluxTransformer2dModel(FluxTransformer2DModel, NunchakuModelLoader
             elif "lora" in k:
                 new_quantized_part_sd[k] = v
         transformer._quantized_part_sd = new_quantized_part_sd
+        if precision == "mxfp4":
+            raise NotImplementedError(
+                "MXFP4 checkpoints are recognized, but the native QuantizedFluxModel path still exposes only "
+                "INT4/NVFP4 kernels. Add MXFP4 kernels before loading this checkpoint through the native path."
+            )
         m = load_quantized_module(
             quantized_part_sd,
             device=device,

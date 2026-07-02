@@ -3,7 +3,7 @@
 
 namespace nunchaku::kernels {
 
-template<typename Config, bool USE_FP4>
+template<typename Config, bool USE_FP4, bool USE_MXFP4 = false>
 class GEMM_W4A4_Launch {
     using GEMM      = GEMM_W4A4<Config>;
     using Epilogues = Epilogues<Config>;
@@ -15,6 +15,8 @@ class GEMM_W4A4_Launch {
     using packed_wscale_t  = typename GEMM::packed_wscale_t;
     using packed_amscale_t = typename GEMM::packed_amscale_t;
     using packed_wmscale_t = typename GEMM::packed_wmscale_t;
+    using packed_amxscale_t = typename GEMM::packed_amxscale_t;
+    using packed_wmxscale_t = typename GEMM::packed_wmxscale_t;
     using packed_fpsum_t   = typename GEMM::packed_fpsum_t;
     using half_t           = typename GEMM::half_t;
 

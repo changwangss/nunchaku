@@ -30,6 +30,7 @@ void gemm_w4a4(std::optional<torch::Tensor> act,            // packed act [M, K 
                std::vector<float> lora_scales,
                bool fuse_silu,
                bool fp4,
+               bool mxfp4,
                float alpha,
                std::optional<torch::Tensor> wcscales,
                std::optional<torch::Tensor> out_q, // packed attention [B, H, M, D]
@@ -71,6 +72,7 @@ void gemm_w4a4(std::optional<torch::Tensor> act,            // packed act [M, K 
                                  lora_scales,
                                  fuse_silu,
                                  fp4,
+                                 mxfp4,
                                  alpha,
                                  getTensor(wcscales),
                                  getTensor(out_q),
@@ -87,7 +89,8 @@ void quantize_w4a4_act_fuse_lora(std::optional<torch::Tensor> input,
                                  std::optional<torch::Tensor> lora_act_out,
                                  std::optional<torch::Tensor> smooth,
                                  bool fuse_glu,
-                                 bool fp4) {
+                                 bool fp4,
+                                 bool mxfp4) {
     TorchOpContext ctx;
 
     spdlog::trace("running quantize_w4a4_act_fuse_lora: ");
@@ -108,7 +111,8 @@ void quantize_w4a4_act_fuse_lora(std::optional<torch::Tensor> input,
                                                    getTensor(lora_act_out),
                                                    getTensor(smooth),
                                                    fuse_glu,
-                                                   fp4);
+                                                   fp4,
+                                                   mxfp4);
 }
 
 void attention_fp16(torch::Tensor q, // packed [Batch, Head, TokensQ, HEAD_DIM]

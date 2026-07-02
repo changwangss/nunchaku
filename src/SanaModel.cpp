@@ -73,6 +73,7 @@ Tensor SanaLinearAttention::forward(Tensor x, Tensor out) {
                        qkv_proj.lora_scales,
                        false,
                        qkv_proj.use_fp4,
+                       false,
                        *qkv_proj.wtscale.data_ptr<float>(),
                        qkv_proj.wcscales.numel() > 0 ? qkv_proj.wcscales : Tensor{},
                        {},

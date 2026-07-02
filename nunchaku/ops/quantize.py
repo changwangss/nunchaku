@@ -17,6 +17,7 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
     smooth: torch.Tensor | None = None,
     fuse_glu: bool = False,
     fp4: bool = False,
+    mxfp4: bool = False,
     pad_size: int = 256,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -40,6 +41,8 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
         If True, fuse GLU activation.
     fp4 : bool, default=False
         If True, use NVFP4 quantization; else INT4.
+    mxfp4 : bool, default=False
+        If True, use MXFP4 quantization with 32-value microscaling groups.
     pad_size : int, default=256
         Pad batch size to a multiple of this value for efficient CUDA execution.
 
@@ -59,16 +62,21 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
     - M: batch size
     - K: input channels
     - R: LoRA rank
-    - G: group size (64 for INT4, 16 for NVFP4)
+    - G: group size (64 for INT4, 16 for NVFP4, 32 for MXFP4)
     - M_pad: padded batch size = ceil(M / pad_size) * pad_size
     """
+    if fp4 and mxfp4:
+        raise ValueError("fp4 and mxfp4 are mutually exclusive")
     batch_size, channels = input.shape
     rank = lora_down.shape[1]
     batch_size_pad = ceil_divide(batch_size, pad_size) * pad_size
     if output is None:
         output = torch.empty(batch_size_pad, channels // 2, dtype=torch.uint8, device=input.device)
     if oscales is None:
-        if fp4:
+        if mxfp4:
+            assert channels % 32 == 0
+            oscales = torch.empty(channels // 32, batch_size_pad, dtype=torch.uint8, device=input.device)
+        elif fp4:
             assert channels % 16 == 0
             oscales = torch.empty(channels // 16, batch_size_pad, dtype=torch.float8_e4m3fn, device=input.device)
         else:
@@ -77,5 +85,5 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
     if lora_act_out is None:
         lora_act_out = torch.empty(batch_size_pad, rank, dtype=torch.float32, device=input.device)
 
-    ops.quantize_w4a4_act_fuse_lora(input, output, oscales, lora_down, lora_act_out, smooth, fuse_glu, fp4)
+    ops.quantize_w4a4_act_fuse_lora(input, output, oscales, lora_down, lora_act_out, smooth, fuse_glu, fp4, mxfp4)
     return output, oscales, lora_act_out

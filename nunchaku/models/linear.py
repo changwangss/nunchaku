@@ -24,8 +24,8 @@ class SVDQW4A4Linear(nn.Module):
         SVD low-rank dimension. Default is 32.
     bias : bool, optional
         If True, adds a learnable bias. Default is True.
-    precision : {'int4', 'nvfp4'}, optional
-        Quantization precision data type ('int4' or 'nvfp4'). Default is 'int4'.
+    precision : {'int4', 'nvfp4', 'mxfp4'}, optional
+        Quantization precision data type. Default is 'int4'.
     act_unsigned : bool, optional
         If True, use unsigned activation quantization (int4 only). Default is False.
     torch_dtype : torch.dtype, optional
@@ -39,16 +39,16 @@ class SVDQW4A4Linear(nn.Module):
     out_features : int
     rank : int
     precision : str
-        'int4' or 'nvfp4'.
+        'int4', 'nvfp4', or 'mxfp4'.
     group_size : int
-        64 for int4, 16 for nvfp4.
+        64 for int4, 16 for nvfp4, 32 for mxfp4.
     qweight : nn.Parameter
         Packed quantized weights, shape (out_features, in_features // 2), dtype int8.
     bias : nn.Parameter or None
         Bias tensor.
     wscales : nn.Parameter
         Weight scales, shape (in_features // group_size, out_features).
-        Dtype: bfloat16/float16 (int4), float8_e4m3fn (nvfp4).
+        Dtype: bfloat16/float16 (int4), float8_e4m3fn (nvfp4), uint8 (mxfp4 E8M0 microscales).
     smooth_factor : nn.Parameter
         Smoothing factors, shape (in_features,).
     smooth_factor_orig : nn.Parameter
@@ -88,6 +88,8 @@ class SVDQW4A4Linear(nn.Module):
 
         if precision == "nvfp4":
             self.group_size = 16
+        elif precision == "mxfp4":
+            self.group_size = 32
         elif precision == "int4":
             self.group_size = 64
         else:
@@ -106,7 +108,7 @@ class SVDQW4A4Linear(nn.Module):
             torch.empty(
                 in_features // self.group_size,
                 out_features,
-                dtype=torch_dtype if precision == "int4" else torch.float8_e4m3fn,
+                dtype=self._scale_dtype(precision, torch_dtype),
                 device=device,
             ),
             requires_grad=False,
@@ -131,6 +133,16 @@ class SVDQW4A4Linear(nn.Module):
             self.wcscales = None
 
         self.act_unsigned = act_unsigned
+
+    @staticmethod
+    def _scale_dtype(precision: str, torch_dtype: torch.dtype) -> torch.dtype:
+        if precision == "int4":
+            return torch_dtype
+        if precision == "nvfp4":
+            return torch.float8_e4m3fn
+        if precision == "mxfp4":
+            return torch.uint8
+        raise ValueError(f"Invalid precision: {precision}")
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, **kwargs):
@@ -213,7 +225,12 @@ class SVDQW4A4Linear(nn.Module):
         N: batch size
         """
         quantized_x, ascales, lora_act_out = svdq_quantize_w4a4_act_fuse_lora_cuda(
-            x, lora_down=self.proj_down, smooth=self.smooth_factor, fp4=self.precision == "nvfp4", pad_size=pad_size
+            x,
+            lora_down=self.proj_down,
+            smooth=self.smooth_factor,
+            fp4=self.precision == "nvfp4",
+            mxfp4=self.precision == "mxfp4",
+            pad_size=pad_size,
         )
         return quantized_x, ascales, lora_act_out
 
@@ -262,6 +279,7 @@ class SVDQW4A4Linear(nn.Module):
             lora_up=self.proj_up,
             bias=self.bias,
             fp4=self.precision == "nvfp4",
+            mxfp4=self.precision == "mxfp4",
             alpha=self.wtscale,
             wcscales=self.wcscales,
             act_unsigned=self.act_unsigned,

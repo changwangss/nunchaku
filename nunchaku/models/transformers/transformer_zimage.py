@@ -20,7 +20,7 @@ from nunchaku.models.unets.unet_sdxl import NunchakuSDXLFeedForward
 
 from ...ops.gemm import svdq_gemm_w4a4_cuda
 from ...ops.quantize import svdq_quantize_w4a4_act_fuse_lora_cuda
-from ...utils import get_precision, pad_tensor
+from ...utils import get_precision_from_quantization_config, pad_tensor
 from ..attention import NunchakuBaseAttention
 from ..attention_processors.zimage import NunchakuZSingleStreamAttnProcessor
 from ..embeddings import pack_rotemb
@@ -400,7 +400,7 @@ class NunchakuZImageTransformer2DModel(ZImageTransformer2DModel, NunchakuModelLo
         skip_refiners = quantization_config.get("skip_refiners", False)
         transformer = transformer.to(torch_dtype)
 
-        precision = get_precision()
+        precision = get_precision_from_quantization_config(quantization_config)
         if precision == "fp4":
             precision = "nvfp4"
 

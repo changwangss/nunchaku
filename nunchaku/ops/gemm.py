@@ -33,6 +33,7 @@ def svdq_gemm_w4a4_cuda(
     lora_scales: list[float] | None = None,
     fuse_silu: bool = False,
     fp4: bool = False,
+    mxfp4: bool = False,
     alpha: float | None = 1.0,
     wcscales: torch.Tensor | None = None,
     out_q: torch.Tensor | None = None,
@@ -91,6 +92,8 @@ def svdq_gemm_w4a4_cuda(
         If True, fuse SiLU activation.
     fp4 : bool, default=False
         If True, use 4-bit floating point quantization (NVFP4).
+    mxfp4 : bool, default=False
+        If True, use MXFP4 quantization with 32-value microscaling groups.
     alpha : float or None, default=1.0
         Per-tensor scaling factor for NVFP4.
     wcscales : torch.Tensor or None, shape (N,), dtype float8_e4m3fn, optional
@@ -116,12 +119,14 @@ def svdq_gemm_w4a4_cuda(
     - M: batch size (input tokens)
     - K: input channels (feature dimension)
     - N: output channels
-    - G: group size (64 for INT4, 16 for NVFP4)
+    - G: group size (64 for INT4, 16 for NVFP4, 32 for MXFP4)
     - R: LoRA rank
     - B: batch size for attention
     - H: number of heads
     - D: head dimension
     """
+    if fp4 and mxfp4:
+        raise ValueError("fp4 and mxfp4 are mutually exclusive")
     if lora_scales is None:
         rank = lora_up.shape[1]
         lora_scales = [1.0] * math.ceil(rank / 16)
@@ -151,6 +156,7 @@ def svdq_gemm_w4a4_cuda(
         lora_scales,
         fuse_silu,
         fp4,
+        mxfp4,
         alpha,
         wcscales,
         out_q,

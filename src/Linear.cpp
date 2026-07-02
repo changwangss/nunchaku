@@ -184,7 +184,7 @@ void GEMM_W4A4::forward(Tensor x,
     Tensor dummy = Tensor::empty_like(qact.lora_act);
     dummy.zero_();
 
-    gemm_w4a4(qact.act, qweight, out, {}, qact.ascales, wscales, {}, pool, dummy, this->lora_up, {}, {}, norm_q, norm_k, rotary_emb, this->bias, {}, qact.is_unsigned);
+    gemm_w4a4(qact.act, qweight, out, {}, qact.ascales, wscales, {}, pool, dummy, this->lora_up, {}, {}, norm_q, norm_k, rotary_emb, this->bias, {}, {}, {}, qact.is_unsigned, this->lora_scales, false, use_fp4, false, *this->wtscale.data_ptr<float>(), wcscales.numel() > 0 ? wcscales : Tensor{}, out_q, out_k, out_v, numTokens);
     debug("gemm.nolora.out", out);
 #endif
 
@@ -211,6 +211,7 @@ void GEMM_W4A4::forward(Tensor x,
                        this->lora_scales,
                        false,
                        use_fp4,
+                       false,
                        *this->wtscale.data_ptr<float>(),
                        wcscales.numel() > 0 ? wcscales : Tensor{},
                        out_q,
@@ -240,7 +241,16 @@ void GEMM_W4A4::forward(Tensor x,
                        this->bias,
                        {},
                        qact.is_unsigned,
-                       this->lora_scales);
+                       this->lora_scales,
+                       false,
+                       use_fp4,
+                       false,
+                       *this->wtscale.data_ptr<float>(),
+                       wcscales.numel() > 0 ? wcscales : Tensor{},
+                       out_q,
+                       out_k,
+                       out_v,
+                       numTokens);
 
     nvtxRangePushA("LoraUp");
 
@@ -304,7 +314,7 @@ GEMM_W4A4::forward_quant(QuantizedActivation qact, FuseOptions fuse, GEMM_W4A4 *
     Tensor dummy = Tensor::empty_like(qact.lora_act);
     dummy.zero_();
 
-    gemm_w4a4(qact.act, qweight, out, qout.act, qact.ascales, wscales, qout.ascales, {}, dummy, this->lora_up, next_lora, qout.lora_act, {}, {}, {}, this->bias, next_smooth, qact.is_unsigned);
+    gemm_w4a4(qact.act, qweight, out, qout.act, qact.ascales, wscales, qout.ascales, {}, dummy, this->lora_up, next_lora, qout.lora_act, {}, {}, {}, this->bias, next_smooth, {}, {}, qact.is_unsigned, this->lora_scales, fuse == FuseOptions::SILU, use_fp4, false, *this->wtscale.data_ptr<float>(), wcscales.numel() > 0 ? wcscales : Tensor{}, {}, {}, {}, 0);
 
     if (fuse == FuseOptions::EMPTY) {
         debug("gemm.nolora.out", out);
@@ -338,6 +348,7 @@ GEMM_W4A4::forward_quant(QuantizedActivation qact, FuseOptions fuse, GEMM_W4A4 *
                        this->lora_scales,
                        fuse == FuseOptions::SILU,
                        use_fp4,
+                       false,
                        *this->wtscale.data_ptr<float>(),
                        wcscales.numel() > 0 ? wcscales : Tensor{},
                        {},
@@ -378,7 +389,16 @@ GEMM_W4A4::forward_quant(QuantizedActivation qact, FuseOptions fuse, GEMM_W4A4 *
                        this->bias,
                        next_smooth,
                        qact.is_unsigned,
-                       this->lora_scales);
+                       this->lora_scales,
+                       false,
+                       use_fp4,
+                       false,
+                       *this->wtscale.data_ptr<float>(),
+                       wcscales.numel() > 0 ? wcscales : Tensor{},
+                       {},
+                       {},
+                       {},
+                       0);
 
     nvtxRangePushA("LoraUp");
 
@@ -464,7 +484,7 @@ GEMM_W4A4::QuantizedActivation GEMM_W4A4::quantize(Tensor x, bool fuse_glu) {
     debug("quantize.smooth", this->smooth);
 
     kernels::quantize_w4a4_act_fuse_lora(
-        x, qact.act, qact.ascales, this->lora_down, qact.lora_act, this->smooth, fuse_glu, use_fp4);
+        x, qact.act, qact.ascales, this->lora_down, qact.lora_act, this->smooth, fuse_glu, use_fp4, false);
 
     debug("quantize.qact", qact.act);
     debug("quantize.ascales", qact.ascales);

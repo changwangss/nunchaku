@@ -60,6 +60,23 @@ public:
     using amscale_warp = std::array<packed_amscale_t, AMSCALES_NUM_PACKS>;
     using wmscale_warp = std::array<packed_wmscale_t, WMSCALES_NUM_PACKS>;
 
+    static constexpr int WMXSCALES_PACK_SIZE   = clamp(WARP_N / 32, 1, 4);
+    static constexpr int WMXSCALES_NUM_PACKS   = ceilDiv(WARP_N / 32, WMXSCALES_PACK_SIZE);
+    static constexpr int WMXSCALES_VALID_LANES = WARP_SIZE;
+
+    static constexpr int AMXSCALES_PACK_SIZE   = clamp(WARP_M / 32, 1, 4);
+    static constexpr int AMXSCALES_NUM_PACKS   = ceilDiv(WARP_M / 32, AMXSCALES_PACK_SIZE);
+    static constexpr int AMXSCALES_VALID_LANES = WARP_SIZE;
+
+    struct packed_wmxscale_t {
+        uint16_t data[WMXSCALES_PACK_SIZE];
+    };
+    struct packed_amxscale_t {
+        uint16_t data[AMXSCALES_PACK_SIZE];
+    };
+    using amxscale_warp = std::array<packed_amxscale_t, AMXSCALES_NUM_PACKS>;
+    using wmxscale_warp = std::array<packed_wmxscale_t, WMXSCALES_NUM_PACKS>;
+
     // amscales: [M / BLOCK_M, K / group size, NUM_WARPS, AMSCALES_NUM_PACKS, WARP_SIZE] of packed_amscale_t
     __device__ __forceinline__ static void
     load_amscale(const packed_amscale_t *ptr, int group, amscale_warp &out, bool pred) {
@@ -80,6 +97,44 @@ public:
         for (int i = 0; i < WMSCALES_NUM_PACKS; i++) {
             out[i] = load_pred(&ptr[(group * WMSCALES_NUM_PACKS + i) * WMSCALES_VALID_LANES + laneId], pred);
         }
+    }
+
+    __device__ __forceinline__ static void
+    load_amxscale(const packed_amxscale_t *ptr, int group, amxscale_warp &out, bool pred) {
+        const int laneId = threadIdx.x % WARP_SIZE;
+        const int warpId = threadIdx.x / WARP_SIZE;
+#pragma unroll
+        for (int i = 0; i < AMXSCALES_NUM_PACKS; i++) {
+            out[i] = load_pred(&ptr[(group * NUM_WARPS + warpId) * AMXSCALES_NUM_PACKS * AMXSCALES_VALID_LANES +
+                                    i * AMXSCALES_VALID_LANES + laneId],
+                               pred);
+        }
+    }
+
+    __device__ __forceinline__ static void
+    load_wmxscale(const packed_wmxscale_t *ptr, int group, wmxscale_warp &out, bool pred) {
+        const int laneId = threadIdx.x % WARP_SIZE;
+#pragma unroll
+        for (int i = 0; i < WMXSCALES_NUM_PACKS; i++) {
+            out[i] = load_pred(&ptr[(group * WMXSCALES_NUM_PACKS + i) * WMXSCALES_VALID_LANES + laneId], pred);
+        }
+    }
+
+    __device__ __forceinline__ static uint8_t quantize_float_ue8m0(float value) {
+        if (!(value > 0.0f) || !isfinite(value)) {
+            return 127;
+        }
+        int exp = int(ceilf(log2f(value)));
+        exp     = clamp(exp, -127, 127);
+        return uint8_t(exp + 127);
+    }
+
+    __device__ __forceinline__ static float dequantize_float_ue8m0(uint8_t value) {
+        return exp2f(float(int(value) - 127));
+    }
+
+    __device__ __forceinline__ static uint32_t quantize_float2_ue8m0(float2 value) {
+        return uint32_t(quantize_float_ue8m0(value.x)) | (uint32_t(quantize_float_ue8m0(value.y)) << 8);
     }
 
     __device__ __forceinline__ static void quantize_w4a4_fp4_from_fpsum_warp(
@@ -186,6 +241,95 @@ public:
         }
     }
 
+    __device__ __forceinline__ static void quantize_w4a4_mxfp4_from_fpsum_warp(
+        const packed_fpsum_t (&fpsum)[INSN_K / INSN_N], packed_act_t &output, uint16_t &output_scale, int ida) {
+
+        constexpr int NUM_GROUPS = 2;
+        constexpr float QVALUE_MAX = 6.0f;
+        constexpr float RECPI_QVALUE_MAX = 1 / QVALUE_MAX;
+
+        const int laneId = threadIdx.x % WARP_SIZE;
+
+        half2_t input[2][INSN_K / INSN_N * 2];
+#pragma unroll
+        for (int i = 0; i < INSN_K / INSN_N; i++) {
+            input[0][i * 2 + 0] = fpsum[i].data[0];
+            input[0][i * 2 + 1] = fpsum[i].data[2];
+            input[1][i * 2 + 0] = fpsum[i].data[1];
+            input[1][i * 2 + 1] = fpsum[i].data[3];
+        }
+
+        auto maxabs = [](half2_t val) ALWAYSINLINE {
+            val = __habs2(val);
+            return __hmax(val.x, val.y);
+        };
+
+        half_t maxvalue[2][NUM_GROUPS];
+#pragma unroll
+        for (int i = 0; i < NUM_GROUPS; i++) {
+            maxvalue[0][i] = __hmax(__hmax(maxabs(input[0][i * 4]), maxabs(input[0][i * 4 + 1])),
+                                    __hmax(maxabs(input[0][i * 4 + 2]), maxabs(input[0][i * 4 + 3])));
+            maxvalue[1][i] = __hmax(__hmax(maxabs(input[1][i * 4]), maxabs(input[1][i * 4 + 1])),
+                                    __hmax(maxabs(input[1][i * 4 + 2]), maxabs(input[1][i * 4 + 3])));
+        }
+#pragma unroll
+        for (int mask = 2; mask > 0; mask /= 2) {
+#pragma unroll
+            for (int i = 0; i < NUM_GROUPS; i++) {
+                maxvalue[0][i] = __hmax(maxvalue[0][i], __shfl_xor_sync(~0, maxvalue[0][i], mask));
+                maxvalue[1][i] = __hmax(maxvalue[1][i], __shfl_xor_sync(~0, maxvalue[1][i], mask));
+            }
+        }
+
+        uint8_t scale_code[2][NUM_GROUPS];
+        float rscale[2][NUM_GROUPS];
+#pragma unroll
+        for (int i = 0; i < NUM_GROUPS; i++) {
+            float scale0 = float(maxvalue[0][i]) * RECPI_QVALUE_MAX;
+            float scale1 = float(maxvalue[1][i]) * RECPI_QVALUE_MAX;
+            scale_code[0][i] = quantize_float_ue8m0(scale0);
+            scale_code[1][i] = quantize_float_ue8m0(scale1);
+            rscale[0][i] = cuda_frcp(dequantize_float_ue8m0(scale_code[0][i]));
+            rscale[1][i] = cuda_frcp(dequantize_float_ue8m0(scale_code[1][i]));
+        }
+
+        if (laneId % 4 / 2 == ida) {
+            output_scale = (laneId % 2 == 0)
+                               ? uint16_t(uint32_t(scale_code[0][0]) | (uint32_t(scale_code[0][1]) << 8))
+                               : uint16_t(uint32_t(scale_code[1][0]) | (uint32_t(scale_code[1][1]) << 8));
+        }
+
+        uint32_t qpacks[2][INSN_K / INSN_M * 2];
+#pragma unroll
+        for (int i = 0; i < INSN_K / INSN_M * 2; i++) {
+#pragma unroll
+            for (int j = 0; j < 2; j++) {
+                float2 fval  = half22float2(input[j][i]) * make_float2(rscale[j][i / 4], rscale[j][i / 4]);
+                qpacks[j][i] = quantize_float2_fp4(fval) << (laneId % 4 * 8);
+            }
+        }
+
+#pragma unroll
+        for (int mask = 1; mask <= 2; mask *= 2) {
+#pragma unroll
+            for (int i = 0; i < INSN_K / INSN_M * 2; i++) {
+#pragma unroll
+                for (int j = 0; j < 2; j++) {
+                    qpacks[j][i] |= __shfl_xor_sync(~0, qpacks[j][i], mask);
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            if (laneId % 4 == i) {
+                output.x = qpacks[0][0 + i];
+                output.y = qpacks[1][0 + i];
+                output.z = qpacks[0][4 + i];
+                output.w = qpacks[1][4 + i];
+            }
+        }
+    }
+
     // m16n16k64 MMA
     // ida, idb in {0, 1}
     __device__ __forceinline__ static packed_f32psum_t mma_fp4(packed_act_t act,
@@ -249,6 +393,67 @@ public:
         return out;
     }
 
+    __device__ __forceinline__ static packed_f32psum_t mma_mxfp4(packed_act_t act,
+                                                                 packed_wgt_t wgt,
+                                                                 packed_f32psum_t psum,
+                                                                 uint32_t amscale,
+                                                                 uint32_t wmscale,
+                                                                 int ida,
+                                                                 int idb) {
+        packed_f32psum_t out;
+        asm volatile(
+            "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::2X.f32.e2m1.e2m1.f32.ue8m0 "
+            "{%0, %1, %2, %3}, "
+            "{%4, %5, %6, %7}, "
+            "{%8, %9}, "
+            "{%10, %11, %12, %13}, "
+            "{%14}, {%15, %16}, "
+            "{%17}, {%18, %19};"
+            : "=f"(out.data[0]), "=f"(out.data[1]), "=f"(out.data[2]), "=f"(out.data[3])
+            : "r"(act.x),
+              "r"(act.y),
+              "r"(act.z),
+              "r"(act.w),
+              "r"(wgt.x),
+              "r"(wgt.y),
+              "f"(psum.data[0]),
+              "f"(psum.data[1]),
+              "f"(psum.data[2]),
+              "f"(psum.data[3]),
+              "r"(amscale),
+              "n"(0),
+              "h"((short)ida),
+              "r"(wmscale),
+              "n"(0),
+              "h"((short)idb));
+        asm volatile(
+            "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::2X.f32.e2m1.e2m1.f32.ue8m0 "
+            "{%0, %1, %2, %3}, "
+            "{%4, %5, %6, %7}, "
+            "{%8, %9}, "
+            "{%10, %11, %12, %13}, "
+            "{%14}, {%15, %16}, "
+            "{%17}, {%18, %19};"
+            : "=f"(out.data[4]), "=f"(out.data[5]), "=f"(out.data[6]), "=f"(out.data[7])
+            : "r"(act.x),
+              "r"(act.y),
+              "r"(act.z),
+              "r"(act.w),
+              "r"(wgt.z),
+              "r"(wgt.w),
+              "f"(psum.data[4]),
+              "f"(psum.data[5]),
+              "f"(psum.data[6]),
+              "f"(psum.data[7]),
+              "r"(amscale),
+              "n"(0),
+              "h"((short)ida),
+              "r"(wmscale),
+              "n"(0),
+              "h"((short)idb));
+        return out;
+    }
+
     __device__ __forceinline__ static void
     compute_fp4(act_warp A, wgt_warp W, amscale_warp amscale, wmscale_warp wmscale, f32psum_warp &psum) {
         const int laneId = threadIdx.x % WARP_SIZE;
@@ -266,6 +471,24 @@ public:
                             wmscale[j / 2 / WMSCALES_PACK_SIZE].data[j / 2 % WMSCALES_PACK_SIZE],
                             i % 2,
                             j % 2);
+            }
+        }
+    }
+
+    __device__ __forceinline__ static void
+    compute_mxfp4(act_warp A, wgt_warp W, amxscale_warp amscale, wmxscale_warp wscale, f32psum_warp &psum) {
+#pragma unroll
+        for (int j = 0; j < WARP_N_TILES; j++) {
+#pragma unroll
+            for (int i = 0; i < WARP_M_TILES; i++) {
+                psum[i * WARP_N_TILES + j] =
+                    mma_mxfp4(A[i],
+                              W[j],
+                              psum[i * WARP_N_TILES + j],
+                              uint32_t(amscale[i / 2 / AMXSCALES_PACK_SIZE].data[i / 2 % AMXSCALES_PACK_SIZE]),
+                              uint32_t(wscale[j / 2 / WMXSCALES_PACK_SIZE].data[j / 2 % WMXSCALES_PACK_SIZE]),
+                              i % 2,
+                              j % 2);
             }
         }
     }
@@ -356,6 +579,81 @@ public:
     }
 
     template<typename Epilogue, bool USE_ALPHA>
+    __device__ __forceinline__ static void gemm_w4a4_mxfp4_block(const BlockInfo binfo,
+                                                                 const packed_act_t *act,
+                                                                 const packed_wgt_t *wgt,
+                                                                 const packed_amxscale_t *ascales,
+                                                                 const packed_wmxscale_t *wscales,
+                                                                 float alpha,
+                                                                 int M,
+                                                                 int N,
+                                                                 int K,
+                                                                 const Epilogue::Arguments &epilogueArgs,
+                                                                 bool alwaysfalse) {
+        constexpr int NUM_STAGES = 2;
+
+        act_warp A[NUM_STAGES];
+        wgt_warp W[NUM_STAGES];
+        amxscale_warp ascale[NUM_STAGES];
+        wmxscale_warp wscale[NUM_STAGES];
+        f32psum_warp fpsum;
+
+        for (int k = 0; k < NUM_STAGES - 1; k++) {
+            load_act(act, k, K, A[k], true);
+            load_wgt(wgt, k, K, W[k], true);
+            load_amxscale(ascales, k, ascale[k], true);
+            load_wmxscale(wscales, k, wscale[k], true);
+        }
+
+#pragma unroll
+        for (auto &pack : fpsum) {
+#pragma unroll
+            for (int i = 0; i < 8; i++) {
+                pack.data[i] = 0;
+            }
+        }
+
+        int dummy = 0;
+
+        for (int k1 = 0; k1 < K / WARP_K; k1 += NUM_STAGES) {
+#pragma unroll
+            for (int k2 = 0; k2 < NUM_STAGES; k2++) {
+                int nextk = k1 + k2 + NUM_STAGES - 1;
+                int idx   = (k2 + NUM_STAGES - 1) % NUM_STAGES;
+                bool pred = nextk < K / WARP_K;
+                load_act(act, nextk, K, A[idx], pred);
+                load_wgt(wgt, nextk, K, W[idx], pred);
+                load_amxscale(ascales, nextk, ascale[idx], pred);
+                load_wmxscale(wscales, nextk, wscale[idx], pred);
+
+                compute_mxfp4(A[k2], W[k2], ascale[k2], wscale[k2], fpsum);
+
+                if (alwaysfalse) {
+                    dummy = clock();
+                }
+            }
+        }
+
+        unused_var(dummy, alwaysfalse);
+
+        if constexpr (USE_ALPHA) {
+#pragma unroll
+            for (auto &pack : fpsum) {
+#pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    pack.data[i] *= alpha;
+                }
+            }
+        }
+
+        auto f16psum = packed_fp32_to_fp16(fpsum);
+
+        CHECK_NAN(f16psum, "f16psum");
+
+        Epilogue()(binfo, f16psum, M, N, K, epilogueArgs);
+    }
+
+    template<typename Epilogue, bool USE_ALPHA>
     struct gemm_w4a4_fp4_kernel {
         static constexpr int MIN_ARCH = 1200;
         __device__ void operator()(const packed_act_t *act,
@@ -391,6 +689,55 @@ public:
                     wgt + bn * (K / WARP_K) * WARP_N_TILES * WARP_SIZE,
                     ascales + bm * (K / WARP_K) * NUM_WARPS * AMSCALES_NUM_PACKS * AMSCALES_VALID_LANES,
                     wscales + bn * (K / WARP_K) * WMSCALES_NUM_PACKS * WMSCALES_VALID_LANES,
+                    alpha,
+                    M,
+                    N,
+                    K,
+                    epilogueArgs,
+                    alwaysfalse);
+
+            } else {
+                trap_no_fp4();
+            }
+        }
+    };
+
+    template<typename Epilogue, bool USE_ALPHA>
+    struct gemm_w4a4_mxfp4_kernel {
+        static constexpr int MIN_ARCH = 1200;
+        __device__ void operator()(const packed_act_t *act,
+                                   const packed_wgt_t *wgt,
+                                   const packed_amxscale_t *ascales,
+                                   const packed_wmxscale_t *wscales,
+                                   float alpha,
+                                   int M,
+                                   int N,
+                                   int K,
+                                   Epilogue::Arguments epilogueArgs,
+                                   bool swapBlockXY,
+                                   bool alwaysfalse) {
+            BlockInfo binfo = {
+                .bm         = (int)blockIdx.x,
+                .bn         = (int)blockIdx.y,
+                .numBlocksM = (int)gridDim.x,
+                .numBlocksN = (int)gridDim.y,
+            };
+
+            if (swapBlockXY) {
+                std::swap(binfo.bm, binfo.bn);
+                std::swap(binfo.numBlocksM, binfo.numBlocksN);
+            }
+
+            const int bm = binfo.bm;
+            const int bn = binfo.bn;
+
+            if constexpr (FP4_AVAILABLE) {
+                gemm_w4a4_mxfp4_block<Epilogue, USE_ALPHA>(
+                    binfo,
+                    act + bm * (K / WARP_K) * NUM_WARPS * WARP_M_TILES * WARP_SIZE,
+                    wgt + bn * (K / WARP_K) * WARP_N_TILES * WARP_SIZE,
+                    ascales + bm * (K / WARP_K) * NUM_WARPS * AMXSCALES_NUM_PACKS * AMXSCALES_VALID_LANES,
+                    wscales + bn * (K / WARP_K) * WMXSCALES_NUM_PACKS * WMXSCALES_VALID_LANES,
                     alpha,
                     M,
                     N,
@@ -927,9 +1274,12 @@ public:
         Epilogue()(binfo, f16psum, M, N, K, epilogueArgs);
     }
 
-    template<bool FUSE_GELU, bool USE_UNSIGNED, bool USE_FP4>
+    template<bool FUSE_GELU, bool USE_UNSIGNED, bool USE_FP4, bool USE_MXFP4 = false>
     struct EpilogueQuantize {
-        using oscales_t = typename std::conditional_t<USE_FP4, packed_amscale_t, packed_ascale_t>;
+        using oscales_t = typename std::conditional_t<
+            USE_MXFP4,
+            packed_amxscale_t,
+            typename std::conditional_t<USE_FP4, packed_amscale_t, packed_ascale_t>>;
 
         struct Arguments {
             packed_act_t *qout;
@@ -960,7 +1310,7 @@ public:
 
 #pragma unroll
             for (int group = 0; group < NUM_GROUPS; group++) {
-                amscale_warp omscale;
+                std::conditional_t<USE_MXFP4, amxscale_warp, amscale_warp> omscale;
 
 #pragma unroll
                 for (int i = 0; i < WARP_M_TILES; i++) {
@@ -994,7 +1344,10 @@ public:
                     }
 
                     packed_act_t qresult;
-                    if constexpr (USE_FP4) {
+                    if constexpr (USE_FP4 && USE_MXFP4) {
+                        quantize_w4a4_mxfp4_from_fpsum_warp(
+                            tmp, qresult, omscale[i / 2 / AMXSCALES_PACK_SIZE].data[i / 2 % AMXSCALES_PACK_SIZE], i % 2);
+                    } else if constexpr (USE_FP4) {
                         quantize_w4a4_fp4_from_fpsum_warp(
                             tmp, qresult, omscale[i / 2 / AMSCALES_PACK_SIZE].data[i / 2 % AMSCALES_PACK_SIZE], i % 2);
                     } else {
@@ -1003,7 +1356,14 @@ public:
                     store(&qout[((group * NUM_WARPS + warpId) * WARP_M_TILES + i) * WARP_SIZE + laneId], qresult);
                 }
 
-                if constexpr (USE_FP4) {
+                if constexpr (USE_FP4 && USE_MXFP4) {
+#pragma unroll
+                    for (int k = 0; k < AMXSCALES_NUM_PACKS; k++) {
+                        store(&oscales[((group * NUM_WARPS + warpId) * AMXSCALES_NUM_PACKS + k) * AMXSCALES_VALID_LANES +
+                                       laneId],
+                              omscale[k]);
+                    }
+                } else if constexpr (USE_FP4) {
 #pragma unroll
                     for (int k = 0; k < AMSCALES_NUM_PACKS; k++) {
                         store(&oscales[((group * NUM_WARPS + warpId) * AMSCALES_NUM_PACKS + k) * AMSCALES_VALID_LANES +
@@ -1032,8 +1392,9 @@ public:
                                K,
                                args.qout + (bm * N / WARP_K + bn * NUM_GROUPS) * NUM_WARPS * WARP_M_TILES * WARP_SIZE,
                                args.oscales + (bm * N / WARP_K + bn * NUM_GROUPS) * NUM_WARPS *
-                                                  (USE_FP4 ? AMSCALES_NUM_PACKS * AMSCALES_VALID_LANES
-                                                           : ASCALES_NUM_PACKS * ASCALES_VALID_LANES),
+                                                  (USE_MXFP4 ? AMXSCALES_NUM_PACKS * AMXSCALES_VALID_LANES
+                                                             : (USE_FP4 ? AMSCALES_NUM_PACKS * AMSCALES_VALID_LANES
+                                                                        : ASCALES_NUM_PACKS * ASCALES_VALID_LANES)),
                                args.shift_value,
                                args.smooth_factor + bn * WSCALES_NUM_PACKS * WSCALES_VALID_LANES);
             } else {
@@ -1094,9 +1455,12 @@ public:
         }
     };
 
-    template<bool fuse_glu, bool use_fp4>
+    template<bool fuse_glu, bool use_fp4, bool use_mxfp4 = false>
     struct quantize_w4a4_fuse_lora_kernel {
-        using oscales_t = typename std::conditional_t<use_fp4, packed_amscale_t, packed_ascale_t>;
+        using oscales_t = typename std::conditional_t<
+            use_mxfp4,
+            packed_amxscale_t,
+            typename std::conditional_t<use_fp4, packed_amscale_t, packed_ascale_t>>;
 
         static constexpr int MIN_ARCH = std::is_same_v<half_t, __nv_bfloat16> ? 800 : 750;
         static constexpr size_t SHMEM_PER_WARP =
@@ -1170,16 +1534,17 @@ public:
                                    .alwaysfalse   = args.alwaysfalse,
                                });
 
-            EpilogueQuantize<false, false, use_fp4>()(
+            EpilogueQuantize<false, false, use_fp4, use_mxfp4>()(
                 binfo,
                 fpsum,
                 args.M,
                 args.N,
                 0,
-                typename EpilogueQuantize<false, false, use_fp4>::Arguments{.qout          = args.output,
-                                                                            .oscales       = args.oscales,
-                                                                            .shift_value   = 0,
-                                                                            .smooth_factor = args.smooth_factor});
+                typename EpilogueQuantize<false, false, use_fp4, use_mxfp4>::Arguments{
+                    .qout          = args.output,
+                    .oscales       = args.oscales,
+                    .shift_value   = 0,
+                    .smooth_factor = args.smooth_factor});
         }
     };
 };

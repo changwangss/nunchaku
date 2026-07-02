@@ -23,7 +23,7 @@ from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from huggingface_hub import utils
 from torch import nn
 
-from nunchaku.utils import get_precision
+from nunchaku.utils import get_precision_from_quantization_config
 
 from ..attention import NunchakuBaseAttention, _patch_linear
 from ..attention_processors.sdxl import NunchakuSDXLFA2Processor
@@ -510,7 +510,7 @@ class NunchakuSDXLUNet2DConditionModel(UNet2DConditionModel, NunchakuModelLoader
         rank = quantization_config.get("rank", 32)
         unet = unet.to(torch_dtype)
 
-        precision = get_precision()
+        precision = get_precision_from_quantization_config(quantization_config)
         if precision == "fp4":
             precision = "nvfp4"
 

@@ -197,7 +197,7 @@ def get_precision(
     Parameters
     ----------
     precision : str, optional
-        "auto", "int4", or "fp4" (default: "auto").
+        "auto", "int4", "fp4", or "mxfp4" (default: "auto").
     device : str or torch.device, optional
         Device to check (default: "cuda").
     pretrained_model_name_or_path : str or os.PathLike or None, optional
@@ -206,14 +206,14 @@ def get_precision(
     Returns
     -------
     str
-        The selected precision ("int4" or "fp4").
+        The selected precision ("int4", "fp4", or "mxfp4").
 
     Raises
     ------
     AssertionError
-        If precision is not one of "auto", "int4", or "fp4".
+        If precision is not one of "auto", "int4", "fp4", or "mxfp4".
     """
-    assert precision in ("auto", "int4", "fp4")
+    assert precision in ("auto", "int4", "fp4", "mxfp4")
     if precision == "auto":
         if isinstance(device, str):
             device = torch.device(device)
@@ -223,10 +223,17 @@ def get_precision(
     if pretrained_model_name_or_path is not None:
         if precision == "int4":
             if "fp4" in str(pretrained_model_name_or_path):
-                warnings.warn("The model may be quantized to fp4, but you are loading it with int4 precision.")
+                warnings.warn("The model may be quantized to fp4/mxfp4, but you are loading it with int4 precision.")
         elif precision == "fp4":
             if "int4" in str(pretrained_model_name_or_path):
                 warnings.warn("The model may be quantized to int4, but you are loading it with fp4 precision.")
+            if "mxfp4" in str(pretrained_model_name_or_path):
+                warnings.warn("The model may be quantized to mxfp4, but you are loading it with fp4 precision.")
+        elif precision == "mxfp4":
+            if "int4" in str(pretrained_model_name_or_path) or "fp4" in str(pretrained_model_name_or_path):
+                warnings.warn(
+                    "The model path suggests a different 4-bit precision, but you are loading it with mxfp4 precision."
+                )
     return precision
 
 
@@ -305,6 +312,9 @@ def check_hardware_compatibility(quantization_config: dict, device: str | torch.
         device = torch.device(device)
     capability = torch.cuda.get_device_capability(0 if device.index is None else device.index)
     sm = f"{capability[0]}{capability[1]}"
+    precision = get_precision_from_quantization_config(quantization_config)
+    if precision == "mxfp4":
+        return
     if sm in ["120", "121"]:  # you can only use the fp4 models
         if quantization_config["weight"]["dtype"] != "fp4_e2m1_all":
             raise ValueError('Please use "fp4" quantization for Blackwell GPUs. ')
@@ -322,15 +332,28 @@ def get_precision_from_quantization_config(quantization_config: dict) -> str:
     """
     Get the precision from the quantization configuration.
     """
-    if quantization_config["weight"]["dtype"] == "fp4_e2m1_all":
-        if quantization_config["weight"]["group_size"] == 16:
+    weight_config = quantization_config["weight"]
+    weight_dtype = weight_config["dtype"]
+    group_size = weight_config.get("group_size")
+    if weight_dtype == "fp4_e2m1_all":
+        if group_size == 16:
             return "nvfp4"
+        if group_size == 32:
+            return "mxfp4"
         else:
-            raise ValueError("Currently, nunchaku only supports nvfp4.")
-    elif quantization_config["weight"]["dtype"] == "int4":
+            raise ValueError("Currently, nunchaku only supports fp4_e2m1_all with group_size 16 or 32.")
+    elif weight_dtype in ("mxfp4", "mx_fp4", "mxfp4_e2m1", "mx_fp4_e2m1"):
+        if group_size != 32:
+            raise ValueError("MXFP4 requires group_size 32.")
+        return "mxfp4"
+    elif weight_dtype in ("nvfp4", "nv_fp4"):
+        if group_size != 16:
+            raise ValueError("NVFP4 requires group_size 16.")
+        return "nvfp4"
+    elif weight_dtype == "int4":
         return "int4"
     else:
-        raise ValueError(f"Unsupported quantization dtype: {quantization_config['weight']['dtype']}")
+        raise ValueError(f"Unsupported quantization dtype: {weight_dtype}")
 
 
 def copy_params_into(src: nn.Module, dst: nn.Module, non_blocking: bool = True):
