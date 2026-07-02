@@ -429,6 +429,7 @@ def load_quantized_module(
     path_or_state_dict: str | os.PathLike[str] | dict[str, torch.Tensor],
     device: str | torch.device = "cuda",
     use_fp4: bool = False,
+    use_mxfp4: bool = False,
     offload: bool = False,
     bf16: bool = True,
 ) -> QuantizedFluxModel:
@@ -443,6 +444,8 @@ def load_quantized_module(
         Device to load the model on (default: "cuda").
     use_fp4 : bool, optional
         Whether to use FP4 quantization (default: False).
+    use_mxfp4 : bool, optional
+        Whether to use MXFP4 quantization (default: False).
     offload : bool, optional
         Whether to offload weights to CPU (default: False).
     bf16 : bool, optional
@@ -455,9 +458,11 @@ def load_quantized_module(
     """
     device = torch.device(device)
     assert device.type == "cuda"
+    if use_fp4 and use_mxfp4:
+        raise ValueError("use_fp4 and use_mxfp4 are mutually exclusive")
     m = QuantizedFluxModel()
     cutils.disable_memory_auto_release()
-    m.init(use_fp4, offload, bf16, 0 if device.index is None else device.index)
+    m.init(use_fp4, offload, bf16, 0 if device.index is None else device.index, use_mxfp4=use_mxfp4)
     if isinstance(path_or_state_dict, dict):
         m.loadDict(path_or_state_dict, True)
     else:
@@ -608,15 +613,11 @@ class NunchakuFluxTransformer2dModel(FluxTransformer2DModel, NunchakuModelLoader
             elif "lora" in k:
                 new_quantized_part_sd[k] = v
         transformer._quantized_part_sd = new_quantized_part_sd
-        if precision == "mxfp4":
-            raise NotImplementedError(
-                "MXFP4 checkpoints are recognized, but the native QuantizedFluxModel path still exposes only "
-                "INT4/NVFP4 kernels. Add MXFP4 kernels before loading this checkpoint through the native path."
-            )
         m = load_quantized_module(
             quantized_part_sd,
             device=device,
-            use_fp4=precision == "fp4",
+            use_fp4=precision in ("fp4", "nvfp4"),
+            use_mxfp4=precision == "mxfp4",
             offload=offload,
             bf16=torch_dtype == torch.bfloat16,
         )

@@ -281,15 +281,17 @@ FluxSingleTransformerBlock::FluxSingleTransformerBlock(int dim,
                                                        int attention_head_dim,
                                                        int mlp_ratio,
                                                        bool use_fp4,
+                                                       bool use_mxfp4,
                                                        Tensor::ScalarType dtype,
                                                        Device device)
     : dim(dim), dim_head(attention_head_dim / num_attention_heads), num_heads(num_attention_heads),
       mlp_hidden_dim(dim * mlp_ratio), norm(dim, dtype, device),
-      mlp_fc1(dim, mlp_hidden_dim, true, use_fp4, dtype, device),
-      mlp_fc2(mlp_hidden_dim, dim, true, use_fp4, dtype, device), qkv_proj(dim, dim * 3, true, use_fp4, dtype, device),
+      mlp_fc1(dim, mlp_hidden_dim, true, use_fp4, dtype, device, use_mxfp4),
+      mlp_fc2(mlp_hidden_dim, dim, true, use_fp4, dtype, device, use_mxfp4),
+      qkv_proj(dim, dim * 3, true, use_fp4, dtype, device, use_mxfp4),
       norm_q(dim_head, 1e-6, false, dtype, device), norm_k(dim_head, 1e-6, false, dtype, device),
       attn(num_attention_heads, attention_head_dim / num_attention_heads, device),
-      out_proj(dim, dim, true, use_fp4, dtype, device) {
+      out_proj(dim, dim, true, use_fp4, dtype, device, use_mxfp4) {
     registerChildren(norm, "norm")(mlp_fc1, "mlp_fc1")(mlp_fc2, "mlp_fc2")(qkv_proj, "qkv_proj")(norm_q, "norm_q")(
         norm_k, "norm_k")(attn, "attn")(out_proj, "out_proj");
 }
@@ -411,20 +413,25 @@ JointTransformerBlock::JointTransformerBlock(int dim,
                                              int attention_head_dim,
                                              bool context_pre_only,
                                              bool use_fp4,
+                                             bool use_mxfp4,
                                              Tensor::ScalarType dtype,
                                              Device device)
     : dim(dim), dim_head(attention_head_dim / num_attention_heads), num_heads(num_attention_heads),
       context_pre_only(context_pre_only), norm1(dim, false, dtype, device),
-      norm1_context(dim, context_pre_only, dtype, device), qkv_proj(dim, dim * 3, true, use_fp4, dtype, device),
-      qkv_proj_context(dim, dim * 3, true, use_fp4, dtype, device), norm_q(dim_head, 1e-6, false, dtype, device),
+      norm1_context(dim, context_pre_only, dtype, device),
+      qkv_proj(dim, dim * 3, true, use_fp4, dtype, device, use_mxfp4),
+      qkv_proj_context(dim, dim * 3, true, use_fp4, dtype, device, use_mxfp4),
+      norm_q(dim_head, 1e-6, false, dtype, device),
       norm_k(dim_head, 1e-6, false, dtype, device), norm_added_q(dim_head, 1e-6, false, dtype, device),
       norm_added_k(dim_head, 1e-6, false, dtype, device),
       attn(num_attention_heads, attention_head_dim / num_attention_heads, device),
-      out_proj(dim, dim, true, use_fp4, dtype, device), out_proj_context(dim, dim, true, use_fp4, dtype, device),
+      out_proj(dim, dim, true, use_fp4, dtype, device, use_mxfp4),
+      out_proj_context(dim, dim, true, use_fp4, dtype, device, use_mxfp4),
       norm2(dim, 1e-6, false, dtype, device), norm2_context(dim, 1e-6, false, dtype, device),
-      mlp_fc1(dim, dim * 4, true, use_fp4, dtype, device), mlp_fc2(dim * 4, dim, true, use_fp4, dtype, device),
-      mlp_context_fc1(dim, dim * 4, true, use_fp4, dtype, device),
-      mlp_context_fc2(dim * 4, dim, true, use_fp4, dtype, device) {
+      mlp_fc1(dim, dim * 4, true, use_fp4, dtype, device, use_mxfp4),
+      mlp_fc2(dim * 4, dim, true, use_fp4, dtype, device, use_mxfp4),
+      mlp_context_fc1(dim, dim * 4, true, use_fp4, dtype, device, use_mxfp4),
+      mlp_context_fc2(dim * 4, dim, true, use_fp4, dtype, device, use_mxfp4) {
     registerChildren(norm1, "norm1")(norm1_context, "norm1_context")(qkv_proj, "qkv_proj")(qkv_proj_context,
                                                                                            "qkv_proj_context")(
         norm_q, "norm_q")(norm_k, "norm_k")(norm_added_q, "norm_added_q")(norm_added_k, "norm_added_k")(attn, "attn")(
@@ -1236,13 +1243,14 @@ std::tuple<Tensor, Tensor, Tensor> JointTransformerBlock::forward_ip_adapter_bra
     return {hidden_states, encoder_hidden_states, q_heads};
 }
 
-FluxModel::FluxModel(bool use_fp4, bool offload, Tensor::ScalarType dtype, Device device)
+FluxModel::FluxModel(bool use_fp4, bool use_mxfp4, bool offload, Tensor::ScalarType dtype, Device device)
     : dtype(dtype), offload(offload) {
     CUDADeviceContext model_construction_ctx(device.idx);
+    assert(!(use_fp4 && use_mxfp4));
 
     for (int i = 0; i < 19; i++) {
         transformer_blocks.push_back(
-            std::make_unique<JointTransformerBlock>(3072, 24, 3072, false, use_fp4, dtype, device));
+            std::make_unique<JointTransformerBlock>(3072, 24, 3072, false, use_fp4, use_mxfp4, dtype, device));
         registerChildren(*transformer_blocks.back(), format("transformer_blocks.{}", i));
         if (offload && i > 0) { // don't offload first block
             transformer_blocks.back()->setLazyLoad(true);
@@ -1251,7 +1259,7 @@ FluxModel::FluxModel(bool use_fp4, bool offload, Tensor::ScalarType dtype, Devic
     }
     for (int i = 0; i < 38; i++) {
         single_transformer_blocks.push_back(
-            std::make_unique<FluxSingleTransformerBlock>(3072, 24, 3072, 4, use_fp4, dtype, device));
+            std::make_unique<FluxSingleTransformerBlock>(3072, 24, 3072, 4, use_fp4, use_mxfp4, dtype, device));
         registerChildren(*single_transformer_blocks.back(), format("single_transformer_blocks.{}", i));
         if (offload) {
             single_transformer_blocks.back()->setLazyLoad(true);

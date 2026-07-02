@@ -12,11 +12,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<QuantizedFluxModel>(m, "QuantizedFluxModel")
         .def(py::init<>())
         .def("init",
-             &QuantizedFluxModel::init,
+             [](QuantizedFluxModel &self, bool use_fp4, bool offload, bool bf16, int8_t deviceId, bool use_mxfp4) {
+                 self.init(use_fp4, use_mxfp4, offload, bf16, deviceId);
+             },
              py::arg("use_fp4"),
              py::arg("offload"),
              py::arg("bf16"),
-             py::arg("deviceId"))
+             py::arg("deviceId"),
+             py::arg("use_mxfp4") = false)
         .def("set_residual_callback",
              [](QuantizedFluxModel &self, pybind11::object call_back) {
                  if (call_back.is_none()) {

@@ -9,8 +9,9 @@
 
 class QuantizedFluxModel : public ModuleWrapper<FluxModel> { // : public torch::CustomClassHolder {
 public:
-    void init(bool use_fp4, bool offload, bool bf16, int8_t deviceId) {
+    void init(bool use_fp4, bool use_mxfp4, bool offload, bool bf16, int8_t deviceId) {
         spdlog::info("Initializing QuantizedFluxModel on device {}", deviceId);
+        assert(!(use_fp4 && use_mxfp4));
         if (!bf16) {
             spdlog::info("Use FP16 model");
         }
@@ -21,7 +22,7 @@ public:
 
         CUDADeviceContext ctx(this->deviceId);
         net = std::make_unique<FluxModel>(
-            use_fp4, offload, bf16 ? Tensor::BF16 : Tensor::FP16, Device::cuda((int)deviceId));
+            use_fp4, use_mxfp4, offload, bf16 ? Tensor::BF16 : Tensor::FP16, Device::cuda((int)deviceId));
     }
 
     bool isBF16() {

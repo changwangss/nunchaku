@@ -94,6 +94,7 @@ public:
                                int attention_head_dim,
                                int mlp_ratio,
                                bool use_fp4,
+                               bool use_mxfp4,
                                Tensor::ScalarType dtype,
                                Device device);
     Tensor forward(Tensor hidden_states, Tensor temb, Tensor rotary_emb);
@@ -127,6 +128,7 @@ public:
                           int attention_head_dim,
                           bool context_pre_only,
                           bool use_fp4,
+                          bool use_mxfp4,
                           Tensor::ScalarType dtype,
                           Device device);
     std::tuple<Tensor, Tensor> forward(Tensor hidden_states,
@@ -175,7 +177,7 @@ private:
 
 class FluxModel : public Module {
 public:
-    FluxModel(bool use_fp4, bool offload, Tensor::ScalarType dtype, Device device);
+    FluxModel(bool use_fp4, bool use_mxfp4, bool offload, Tensor::ScalarType dtype, Device device);
     Tensor forward(Tensor hidden_states,
                    Tensor encoder_hidden_states,
                    Tensor temb,
