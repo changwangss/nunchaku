@@ -53,6 +53,8 @@ def fused_gelu_mlp(x: torch.Tensor, fc1: SVDQW4A4Linear, fc2: SVDQW4A4Linear, pa
     qout_act = torch.empty(batch_size_pad, fc1.out_features // 2, dtype=torch.uint8, device=x.device)
     if fc2.precision == "nvfp4":
         qout_ascales = torch.empty(fc1.out_features // 16, batch_size_pad, dtype=torch.float8_e4m3fn, device=x.device)
+    elif fc2.precision == "mxfp4":
+        qout_ascales = torch.empty(fc1.out_features // 32, batch_size_pad, dtype=torch.uint8, device=x.device)
     else:
         qout_ascales = torch.empty(fc1.out_features // 64, batch_size_pad, dtype=x.dtype, device=x.device)
     qout_lora_act = torch.empty(batch_size_pad, fc2.proj_down.shape[1], dtype=torch.float32, device=x.device)
@@ -71,6 +73,7 @@ def fused_gelu_mlp(x: torch.Tensor, fc1: SVDQW4A4Linear, fc2: SVDQW4A4Linear, pa
         bias=fc1.bias,
         smooth_factor=fc2.smooth_factor,
         fp4=fc1.precision == "nvfp4",
+        mxfp4=fc1.precision == "mxfp4",
         alpha=fc1.wtscale,
         wcscales=fc1.wcscales,
     )
@@ -151,6 +154,7 @@ def fused_qkv_norm_rottary(
             lora_up=proj.proj_up,
             bias=proj.bias,
             fp4=proj.precision == "nvfp4",
+            mxfp4=proj.precision == "mxfp4",
             alpha=proj.wtscale,
             wcscales=proj.wcscales,
             norm_q=norm_q.weight if norm_q is not None else None,
@@ -173,6 +177,7 @@ def fused_qkv_norm_rottary(
             lora_up=proj.proj_up,
             bias=proj.bias,
             fp4=proj.precision == "nvfp4",
+            mxfp4=proj.precision == "mxfp4",
             alpha=proj.wtscale,
             wcscales=proj.wcscales,
             norm_q=norm_q.weight if norm_q is not None else None,

@@ -254,6 +254,8 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         torch.Tensor
             Packed scale tensor.
         """
+        if self.bits == 4 and group_size == 32:
+            return self.pack_mxfp4_micro_scale(scale, group_size=group_size)
         if self.check_if_micro_scale(group_size=group_size):
             return self.pack_micro_scale(scale, group_size=group_size)
         # note: refer to https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#mma-16864-c
@@ -358,6 +360,37 @@ class NunchakuWeightPacker(MmaWeightPackerBase):
         scale = scale.view(n // warp_s, num_s_packs, s_pack_size, 4, 8, -1, self.insn_k // group_size)
         scale = scale.permute(0, 5, 1, 4, 3, 2, 6).contiguous()
         return scale.view(-1, n)  # the shape is just used for validation
+
+    @staticmethod
+    def quantize_ue8m0(scale: torch.Tensor) -> torch.Tensor:
+        code = torch.full_like(scale, 127, dtype=torch.int16)
+        valid = torch.isfinite(scale) & (scale > 0)
+        exponent = torch.ceil(torch.log2(scale[valid].to(torch.float32))).clamp_(-127, 127).to(torch.int16)
+        code[valid] = exponent + 127
+        return code.to(torch.uint8)
+
+    @staticmethod
+    def dequantize_ue8m0(code: torch.Tensor) -> torch.Tensor:
+        return torch.exp2(code.to(torch.int16).to(torch.float32) - 127)
+
+    def pack_mxfp4_micro_scale(self, scale: torch.Tensor, group_size: int) -> torch.Tensor:
+        """
+        Pack MXFP4 E8M0 micro scale tensor for Nunchaku MMA.
+        """
+        assert group_size == 32, "MXFP4 only supports group size 32."
+        assert self.insn_k == 64, "insn_k should be 64."
+        if scale.dtype != torch.uint8:
+            scale = self.quantize_ue8m0(scale.to(torch.float32))
+        n = scale.shape[0]
+        assert self.warp_n >= 32, "currently only support warp_n >= 32."
+        s_pack_size = min(max(self.warp_n // self.num_lanes, 1), 4)
+        num_s_lanes = 4 * 8
+        num_s_packs = ceil_divide(self.warp_n, s_pack_size * num_s_lanes)
+        warp_s = num_s_packs * num_s_lanes * s_pack_size
+        assert warp_s == self.warp_n, "warp_n for scales should be equal to warp_n for weights."
+        scale = scale.view(n // warp_s, num_s_packs, s_pack_size, 4, 8, -1, self.insn_k // group_size)
+        scale = scale.permute(0, 5, 1, 4, 3, 2, 6).contiguous()
+        return scale.view(-1, n)
 
     def pack_lowrank_weight(self, weight: torch.Tensor, down: bool) -> torch.Tensor:
         """

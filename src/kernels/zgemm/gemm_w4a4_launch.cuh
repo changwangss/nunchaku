@@ -3,7 +3,7 @@
 
 namespace nunchaku::kernels {
 
-template<typename Config, bool USE_FP4, bool USE_MXFP4 = false>
+template<typename Config, bool USE_FP4, bool USE_MXFP4>
 class GEMM_W4A4_Launch {
     using GEMM      = GEMM_W4A4<Config>;
     using Epilogues = Epilogues<Config>;
