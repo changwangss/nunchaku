@@ -54,3 +54,4 @@ Check out `DeepCompressor <github_deepcompressor_>`_ for the quantization librar
     developer/contribution_guide.rst
     developer/docstring.rst
     developer/build_docs.rst
+    developer/torch213_cu130.rst
