@@ -62,6 +62,9 @@ def merge_safetensors(
     """
     subfolder = kwargs.get("subfolder", None)
     comfy_config_path = kwargs.get("comfy_config_path", None)
+    requested_precision = kwargs.get("precision", "auto")
+    if requested_precision not in {"auto", "int4", "nvfp4", "mxfp4"}:
+        raise ValueError(f"unsupported precision {requested_precision!r}")
 
     if isinstance(pretrained_model_name_or_path, str):
         pretrained_model_name_or_path = Path(pretrained_model_name_or_path)
@@ -114,36 +117,58 @@ def merge_safetensors(
         rank = next((v.shape[1] for k, v in transformer_block_sd.items() if ".proj_down" in k), 32)
         skip_refiners = not any(("refiner" in k and "attention.to_qkv" in k) for k in transformer_block_sd.keys())
 
-    precision = "int4"
-    for v in state_dict.values():
-        assert isinstance(v, torch.Tensor)
-        if v.dtype in [
+    precision = requested_precision
+    if precision == "auto":
+        scale_tensors = [value for key, value in state_dict.items() if key.endswith(".wscales")]
+        if any(value.dtype == torch.uint8 for value in scale_tensors):
+            precision = "mxfp4"
+        elif any(
+            value.dtype
+            in [
             torch.float8_e4m3fn,
             torch.float8_e4m3fnuz,
             torch.float8_e5m2,
             torch.float8_e5m2fnuz,
             torch.float8_e8m0fnu,
-        ]:
-            precision = "fp4"
+            ]
+            for value in scale_tensors
+        ):
+            precision = "nvfp4"
+        else:
+            precision = "int4"
+
+    if precision == "mxfp4":
+        weight_config = {"dtype": "fp4_e2m1_all", "scale_dtype": "ue8m0", "group_size": 32}
+        activation_config = {"dtype": "fp4_e2m1_all", "scale_dtype": "ue8m0", "group_size": 32}
+    elif precision == "nvfp4":
+        weight_config = {
+            "dtype": "fp4_e2m1_all",
+            "scale_dtype": [None, "fp8_e4m3_nan"],
+            "group_size": 16,
+        }
+        activation_config = {
+            "dtype": "fp4_e2m1_all",
+            "scale_dtype": "fp8_e4m3_nan",
+            "group_size": 16,
+        }
+    else:
+        weight_config = {"dtype": "int4", "scale_dtype": None, "group_size": 64}
+        activation_config = {"dtype": "int4", "scale_dtype": None, "group_size": 64}
     quantization_config = {
         "method": "svdquant",
-        "weight": {
-            "dtype": "fp4_e2m1_all" if precision == "fp4" else "int4",
-            "scale_dtype": [None, "fp8_e4m3_nan"] if precision == "fp4" else None,
-            "group_size": 16 if precision == "fp4" else 64,
-        },
-        "activation": {
-            "dtype": "fp4_e2m1_all" if precision == "fp4" else "int4",
-            "scale_dtype": "fp8_e4m3_nan" if precision == "fp4" else None,
-            "group_size": 16 if precision == "fp4" else 64,
-        },
+        "weight": weight_config,
+        "activation": activation_config,
         "rank": rank,
     }
     if "ZImage" in model_class:
         quantization_config["skip_refiners"] = skip_refiners
+    comfy_config = "{}"
+    if comfy_config_path is not None and Path(comfy_config_path).is_file():
+        comfy_config = Path(comfy_config_path).read_text()
     return state_dict, {
         "config": Path(config_path).read_text(),
-        "comfy_config": Path(comfy_config_path).read_text(),
+        "comfy_config": comfy_config,
+        "format": "pt",
         "model_class": model_class,
         "quantization_config": json.dumps(quantization_config),
     }
@@ -159,6 +184,12 @@ if __name__ == "__main__":
         help="Path to model directory. It can also be a huggingface repo.",
     )
     parser.add_argument(
+        "--precision",
+        choices=("auto", "int4", "nvfp4", "mxfp4"),
+        default="auto",
+        help="Quantization format. Auto detects MXFP4 from uint8 E8M0 scales.",
+    )
+    parser.add_argument(
         "-m",
         "--model-class",
         type=str,
@@ -167,7 +198,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("-o", "--output-path", type=Path, required=True, help="Path to output path")
     args = parser.parse_args()
-    state_dict, metadata = merge_safetensors(args.input_path, args.model_class)
+    state_dict, metadata = merge_safetensors(args.input_path, args.model_class, precision=args.precision)
     output_path = Path(args.output_path)
     print(f"    --input-path: {args.input_path}")
     print(f"    --model-class: {args.model_class}")
