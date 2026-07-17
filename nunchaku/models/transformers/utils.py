@@ -23,6 +23,18 @@ logging.basicConfig(level=getattr(logging, log_level, logging.INFO), format="%(a
 logger = logging.getLogger(__name__)
 
 
+def resolve_pretrained_onefile(pretrained_model_name_or_path: str | os.PathLike[str]) -> Path:
+    """Resolve a Diffusers component directory containing a Nunchaku onefile."""
+
+    path = Path(pretrained_model_name_or_path)
+    if path.is_dir():
+        for filename in ("diffusion_pytorch_model.safetensors", "model.safetensors"):
+            onefile_path = path / filename
+            if onefile_path.is_file():
+                return onefile_path
+    return path
+
+
 class NunchakuModelLoaderMixin:
     """
     Mixin for standardized model loading in Nunchaku transformer models.

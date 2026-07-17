@@ -29,7 +29,7 @@ from ...utils import (
     load_state_dict_in_safetensors,
     pad_tensor,
 )
-from .utils import NunchakuModelLoaderMixin
+from .utils import NunchakuModelLoaderMixin, resolve_pretrained_onefile
 
 SVD_RANK = 32
 
@@ -560,6 +560,7 @@ class NunchakuFluxTransformer2dModel(FluxTransformer2DModel, NunchakuModelLoader
         NunchakuFluxTransformer2dModel or (NunchakuFluxTransformer2dModel, dict)
             The loaded model, and optionally metadata if `return_metadata=True`.
         """
+        pretrained_model_name_or_path = resolve_pretrained_onefile(pretrained_model_name_or_path)
         device = kwargs.get("device", "cuda")
         if isinstance(device, str):
             device = torch.device(device)

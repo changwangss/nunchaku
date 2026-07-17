@@ -1,3 +1,5 @@
+from diffusers import ModelMixin
+
 from .models import (
     NunchakuFluxTransformer2dModel,
     NunchakuFluxTransformer2DModelV2,
@@ -8,6 +10,7 @@ from .models import (
 )
 
 __all__ = [
+    "ModelMixin",
     "NunchakuFluxTransformer2dModel",
     "NunchakuSanaTransformer2DModel",
     "NunchakuT5EncoderModel",
