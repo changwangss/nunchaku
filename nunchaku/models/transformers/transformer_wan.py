@@ -98,7 +98,25 @@ class NunchakuWanTransformer3DModel(WanTransformer3DModel, NunchakuModelLoaderMi
 
         transformer._patch_model(precision=precision, rank=rank)
         transformer = transformer.to_empty(device=device)
+        # RoPE tables are non-persistent buffers: to_empty() discards their
+        # initialization, and load_state_dict() cannot restore them.
+        with torch.device("cpu"):
+            rope = type(transformer.rope)(
+                attention_head_dim=transformer.config.attention_head_dim,
+                patch_size=transformer.config.patch_size,
+                max_seq_len=transformer.config.rope_max_seq_len,
+            )
+        transformer.rope = rope.to(device=device, dtype=torch_dtype)
         state_dict = _convert_state_dict_keys(state_dict)
+        # Wan declares numerically sensitive modules in FP32. The generic meta
+        # constructor casts everything to torch_dtype, so restore these tensors
+        # before load_state_dict copies checkpoint values into their destinations.
+        fp32_names = transformer._keep_in_fp32_modules or []
+        for name, tensor in [*transformer.named_parameters(), *transformer.named_buffers()]:
+            if tensor.is_floating_point() and any(part in name for part in fp32_names):
+                tensor.data = tensor.data.to(torch.float32)
+                if name in state_dict:
+                    state_dict[name] = state_dict[name].to(torch.float32)
         patch_scale_key(transformer, state_dict)
         if torch_dtype == torch.float16:
             convert_fp16(transformer, state_dict)

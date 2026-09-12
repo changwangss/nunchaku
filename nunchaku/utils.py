@@ -314,6 +314,11 @@ def check_hardware_compatibility(quantization_config: dict, device: str | torch.
     sm = f"{capability[0]}{capability[1]}"
     precision = get_precision_from_quantization_config(quantization_config)
     if precision == "mxfp4":
+        if sm not in ("120", "121"):
+            raise ValueError(
+                f"This Nunchaku MXFP4 backend requires SM120/SM121, got SM{sm}. "
+                "B200/SM100 requires a separate MXFP4 kernel; changing build targets is insufficient."
+            )
         return
     if sm in ["120", "121"]:  # you can only use the fp4 models
         if quantization_config["weight"]["dtype"] != "fp4_e2m1_all":

@@ -82,3 +82,45 @@ def test_wan_export_keys_are_converted_to_nunchaku_linear_names():
         "blocks.0.attn1.to_q.smooth_factor_orig",
         "blocks.0.attn1.to_q.qweight",
     }
+
+
+def test_wan_onefile_loader_restores_nonpersistent_rope_buffers(tmp_path):
+    import json
+
+    from safetensors.torch import save_file
+
+    model = _tiny_wan_model()
+    model._patch_model(precision="mxfp4", rank=16)
+    model = model.to_empty(device="cpu").to(torch.bfloat16)
+    state = {
+        key.replace(".smooth_factor_orig", ".smooth_orig")
+        .replace(".smooth_factor", ".smooth")
+        .replace(".proj_down", ".lora_down")
+        .replace(".proj_up", ".lora_up"): torch.zeros_like(value)
+        for key, value in model.state_dict().items()
+    }
+    protected_key = "condition_embedder.time_embedder.linear_1.weight"
+    state[protected_key] = torch.full_like(state[protected_key], 1.001, dtype=torch.float32)
+    checkpoint = tmp_path / "model.safetensors"
+    save_file(
+        state,
+        checkpoint,
+        metadata={
+            "config": json.dumps(dict(model.config)),
+            "quantization_config": json.dumps({"rank": 16, "weight": {"dtype": "mxfp4", "group_size": 32}}),
+        },
+    )
+
+    loaded = NunchakuWanTransformer3DModel.from_pretrained(checkpoint, torch_dtype=torch.bfloat16)
+    assert loaded.condition_embedder.time_embedder.linear_1.weight.dtype == torch.float32
+    assert loaded.scale_shift_table.dtype == torch.float32
+    torch.testing.assert_close(loaded.state_dict()[protected_key], state[protected_key], rtol=0, atol=0)
+    assert loaded.blocks[0].attn1.to_q.proj_down.dtype == torch.bfloat16
+    expected = type(loaded.rope)(
+        loaded.config.attention_head_dim, loaded.config.patch_size, loaded.config.rope_max_seq_len
+    ).to(dtype=torch.bfloat16)
+
+    assert "rope.freqs_cos" not in state
+    assert "rope.freqs_sin" not in state
+    torch.testing.assert_close(loaded.rope.freqs_cos, expected.freqs_cos, rtol=0, atol=0)
+    torch.testing.assert_close(loaded.rope.freqs_sin, expected.freqs_sin, rtol=0, atol=0)
